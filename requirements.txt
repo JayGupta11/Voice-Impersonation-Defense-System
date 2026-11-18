@@ -1,0 +1,16 @@
+# Web Server & API
+fastapi
+uvicorn
+websockets
+python-multipart
+pydantic
+
+# Audio Processing
+numpy
+librosa
+soundfile
+
+# Machine Learning & AI Pipeline
+xgboost
+torch
+torchaudio
