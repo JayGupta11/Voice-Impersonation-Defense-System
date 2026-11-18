@@ -1,0 +1,3922 @@
+import React, { useEffect, useRef, useState } from 'react';
+
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  Animated,
+  Alert,
+  StatusBar,
+  Dimensions,
+  FlatList,
+  ScrollView,
+  TextInput,
+  ActivityIndicator,
+  Platform,
+} from 'react-native';
+
+import * as Contacts from 'expo-contacts/legacy';
+import { useAudioPlayer } from 'expo-audio';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
+
+import { File as ExpoFile } from 'expo-file-system';
+import { fetch as expoFetch } from 'expo/fetch';
+
+
+/* =========================================================
+   SCREEN
+   ========================================================= */
+
+const { width } = Dimensions.get('window');
+
+
+/* =========================================================
+   FIXED DEMO NUMBERS
+   ========================================================= */
+
+const HUMAN_DEMO_NUMBER = '*888';
+const SCAM_DEMO_NUMBER = '*999';
+
+type CallType = 'human' | 'scam';
+
+const getDemoType = (number: string): CallType => {
+  const normalized = number.trim();
+
+  if (normalized === HUMAN_DEMO_NUMBER) {
+    return 'human';
+  }
+
+  if (normalized === SCAM_DEMO_NUMBER) {
+    return 'scam';
+  }
+
+  return 'human';
+};
+
+
+/* =========================================================
+   DIAL PAD
+   ========================================================= */
+
+const DIAL_PAD = [
+  { num: '1', letters: '' },
+  { num: '2', letters: 'ABC' },
+  { num: '3', letters: 'DEF' },
+
+  { num: '4', letters: 'GHI' },
+  { num: '5', letters: 'JKL' },
+  { num: '6', letters: 'MNO' },
+
+  { num: '7', letters: 'PQRS' },
+  { num: '8', letters: 'TUV' },
+  { num: '9', letters: 'WXYZ' },
+
+  { num: '*', letters: '' },
+  { num: '0', letters: '+' },
+  { num: '#', letters: '' },
+];
+
+
+export default function App() {
+
+  /* =======================================================
+     REGISTRATION
+     ======================================================= */
+
+  const [isRegistered, setIsRegistered] = useState(false);
+  const [myIdentity, setMyIdentity] = useState('');
+
+
+  /* =======================================================
+     TABS
+     ======================================================= */
+
+  const [activeTab, setActiveTab] = useState<
+    'dialer' | 'contacts' | 'scan'
+  >('dialer');
+
+
+  /* =======================================================
+     CALL
+     ======================================================= */
+
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [inCall, setInCall] = useState(false);
+  const [riskScore, setRiskScore] = useState(0);
+
+  const [currentCallType, setCurrentCallType] =
+    useState<CallType>('human');
+
+
+  /* =======================================================
+     CONTACTS
+     ======================================================= */
+
+  const [myContacts, setMyContacts] = useState<any[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+
+
+  /* =======================================================
+     SCAN
+     ======================================================= */
+
+  const [selectedFile, setSelectedFile] =
+    useState<any>(null);
+
+  const [isAnalyzing, setIsAnalyzing] =
+    useState(false);
+
+  const [fileRiskScore, setFileRiskScore] =
+    useState<number | null>(null);
+
+  const [fileChunks, setFileChunks] =
+    useState<number | null>(null);
+
+
+  /* =======================================================
+     WEBSOCKET
+     ======================================================= */
+
+  const wsRef =
+    useRef<WebSocket | null>(null);
+
+
+  /* =======================================================
+     ANIMATION
+     ======================================================= */
+
+  const pulseAnim =
+    useRef(new Animated.Value(1)).current;
+
+
+  /* =======================================================
+     AUDIO
+     ======================================================= */
+
+  const playerScam =
+    useAudioPlayer(
+      require('./assets/scam_call.wav')
+    );
+
+  const playerHuman =
+    useAudioPlayer(
+      require('./assets/human_call.wav')
+    );
+
+
+  /* =======================================================
+     BACKEND
+     ======================================================= */
+
+  const LOCAL_IP =
+    '10.246.53.218:8000';
+
+  const NGROK_WS =
+    `ws://${LOCAL_IP}`;
+
+  const NGROK_HTTP =
+    `http://${LOCAL_IP}`;
+
+
+  /* =======================================================
+     LOAD CONTACT SUGGESTIONS
+     ======================================================= */
+
+  useEffect(() => {
+
+    if (!isRegistered) {
+      return;
+    }
+
+    const loadSuggestions = async () => {
+
+      try {
+
+        const { status } =
+          await Contacts.requestPermissionsAsync();
+
+        if (status !== 'granted') {
+          return;
+        }
+
+        const { data } =
+          await Contacts.getContactsAsync({
+            fields: [
+              Contacts.Fields.PhoneNumbers,
+              Contacts.Fields.Emails,
+            ],
+            sort: Contacts.SortTypes.FirstName,
+          });
+
+        const contactsWithNumbers =
+          (data || []).filter(
+            (contact: any) =>
+              contact.phoneNumbers &&
+              contact.phoneNumbers.length > 0
+          );
+
+        contactsWithNumbers.sort(
+          (a: any, b: any) => {
+
+            const nameA =
+              (a.name || '').toLowerCase();
+
+            const nameB =
+              (b.name || '').toLowerCase();
+
+            return nameA.localeCompare(nameB);
+          }
+        );
+
+        setMyContacts(
+          contactsWithNumbers
+        );
+
+      } catch (error) {
+
+        console.log(
+          '[SUGGESTIONS] Error:',
+          error
+        );
+      }
+    };
+
+    loadSuggestions();
+
+  }, [isRegistered]);
+
+
+  /* =======================================================
+     RISK ANIMATION
+     ======================================================= */
+
+  useEffect(() => {
+
+    const shouldPulse =
+      riskScore > 75 ||
+      (
+        fileRiskScore !== null &&
+        fileRiskScore > 75
+      );
+
+    if (shouldPulse) {
+
+      const animation =
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(
+              pulseAnim,
+              {
+                toValue: 1.05,
+                duration: 500,
+                useNativeDriver: true,
+              }
+            ),
+
+            Animated.timing(
+              pulseAnim,
+              {
+                toValue: 1,
+                duration: 500,
+                useNativeDriver: true,
+              }
+            ),
+          ])
+        );
+
+      animation.start();
+
+      return () => {
+        animation.stop();
+        pulseAnim.setValue(1);
+      };
+    }
+
+    pulseAnim.setValue(1);
+
+  }, [
+    riskScore,
+    fileRiskScore,
+  ]);
+
+
+  /* =======================================================
+     LOAD CONTACTS
+     ======================================================= */
+
+  const loadContacts = async () => {
+
+    try {
+
+      const { status } =
+        await Contacts.requestPermissionsAsync();
+
+      if (status !== 'granted') {
+
+        Alert.alert(
+          'Permission Required',
+          'Please allow contacts permission to view your contacts.'
+        );
+
+        setActiveTab('contacts');
+
+        return;
+      }
+
+      const { data } =
+        await Contacts.getContactsAsync({
+          fields: [
+            Contacts.Fields.PhoneNumbers,
+            Contacts.Fields.Emails,
+          ],
+          sort: Contacts.SortTypes.FirstName,
+        });
+
+      const contactsWithNumbers =
+        (data || []).filter(
+          (contact: any) =>
+            contact.phoneNumbers &&
+            contact.phoneNumbers.length > 0
+        );
+
+      contactsWithNumbers.sort(
+        (a: any, b: any) => {
+
+          const nameA =
+            (a.name || '').toLowerCase();
+
+          const nameB =
+            (b.name || '').toLowerCase();
+
+          return nameA.localeCompare(nameB);
+        }
+      );
+
+      setMyContacts(
+        contactsWithNumbers
+      );
+
+    } catch (error) {
+
+      console.log(
+        'Contacts error:',
+        error
+      );
+
+      Alert.alert(
+        'Contacts Error',
+        'Unable to load contacts from this device.'
+      );
+    }
+
+    setActiveTab('contacts');
+  };
+
+
+  /* =======================================================
+     CONTACT -> DIALER
+     ======================================================= */
+
+  const callContact = (
+    contact: any
+  ) => {
+
+    const number =
+      contact.phoneNumbers?.[0]?.number ||
+      '';
+
+    if (!number) {
+
+      Alert.alert(
+        'No Phone Number',
+        'This contact does not have a phone number.'
+      );
+
+      return;
+    }
+
+    setPhoneNumber(number);
+
+    setActiveTab('dialer');
+  };
+
+
+  /* =======================================================
+     SUGGESTION -> DIALER
+     ======================================================= */
+
+  const selectSuggestedContact = (
+    contact: any
+  ) => {
+
+    const number =
+      contact.phoneNumbers?.[0]?.number ||
+      '';
+
+    if (!number) {
+      return;
+    }
+
+    setPhoneNumber(number);
+  };
+
+
+  /* =======================================================
+     SUGGESTIONS
+     ======================================================= */
+
+  const suggestedContacts =
+    myContacts
+      .filter(
+        (contact: any) =>
+          contact.name &&
+          contact.phoneNumbers?.length > 0
+      )
+      .slice(0, 10);
+
+
+  /* =======================================================
+     PICK AUDIO FILE
+     ======================================================= */
+
+  const handlePickFile = async () => {
+
+    try {
+
+      const pickerResult =
+        await ExpoFile.pickFileAsync({
+          mimeTypes: ['audio/*'],
+          multipleFiles: false,
+        });
+
+      console.log(
+        '[SCAN] Picker result:',
+        pickerResult
+      );
+
+      if (pickerResult.canceled) {
+        return;
+      }
+
+      const selected =
+        pickerResult.result;
+
+      console.log(
+        '[SCAN] Selected file:',
+        selected
+      );
+
+      console.log(
+        '[SCAN] Name:',
+        selected?.name
+      );
+
+      console.log(
+        '[SCAN] URI:',
+        selected?.uri
+      );
+
+      console.log(
+        '[SCAN] Size:',
+        selected?.size
+      );
+
+      console.log(
+        '[SCAN] Type:',
+        selected?.type
+      );
+
+      setSelectedFile(
+        selected
+      );
+
+      setFileRiskScore(null);
+      setFileChunks(null);
+
+    } catch (error) {
+
+      console.log(
+        '[SCAN] File picker error:',
+        error
+      );
+
+      Alert.alert(
+        'File Error',
+        'Unable to select the audio file.'
+      );
+    }
+  };
+
+
+  /* =======================================================
+     ANALYZE AUDIO
+     ======================================================= */
+
+  const analyzeFile = async () => {
+
+    if (!selectedFile) {
+
+      Alert.alert(
+        'No Audio Selected',
+        'Please select an audio file first.'
+      );
+
+      return;
+    }
+
+    setIsAnalyzing(true);
+
+    setFileRiskScore(null);
+    setFileChunks(null);
+
+    try {
+
+      const uploadUrl =
+        `${NGROK_HTTP}/api/analyze-audio`;
+
+      console.log(
+        '[SCAN] Uploading:',
+        selectedFile.name
+      );
+
+      console.log(
+        '[SCAN] Upload URL:',
+        uploadUrl
+      );
+
+      const formData =
+        new FormData();
+
+      formData.append(
+        'file',
+        selectedFile as any
+      );
+
+      const response =
+        await expoFetch(
+          uploadUrl,
+          {
+            method: 'POST',
+            body: formData,
+          }
+        );
+
+      console.log(
+        '[SCAN] HTTP status:',
+        response.status
+      );
+
+      const data =
+        await response.json();
+
+      console.log(
+        '[SCAN] Backend response:',
+        data
+      );
+
+      if (
+        response.status === 200 &&
+        data.success
+      ) {
+
+        setFileRiskScore(
+          Number(
+            data.risk_score || 0
+          )
+        );
+
+        setFileChunks(
+          Number(
+            data.chunks_analyzed || 0
+          )
+        );
+
+      } else {
+
+        Alert.alert(
+          'Analysis Failed',
+          data.error ||
+            `Server responded with status ${response.status}`
+        );
+      }
+
+    } catch (error) {
+
+      console.log(
+        '[SCAN] Upload error:',
+        error
+      );
+
+      Alert.alert(
+        'Connection Error',
+        'Could not reach the AI backend server.'
+      );
+
+    } finally {
+
+      setIsAnalyzing(false);
+    }
+  };
+
+
+  /* =======================================================
+     START CALL
+     ======================================================= */
+
+  const initiateCall = async () => {
+
+    if (phoneNumber.length < 3) {
+      return;
+    }
+
+    const demoType =
+      getDemoType(
+        phoneNumber
+      );
+
+    setCurrentCallType(
+      demoType
+    );
+
+    setRiskScore(0);
+
+    setInCall(true);
+
+    console.log(
+      '[CALL] Number:',
+      phoneNumber
+    );
+
+    console.log(
+      '[CALL] Fixed demo type:',
+      demoType
+    );
+
+    try {
+
+      const ws =
+        new WebSocket(
+          `${NGROK_WS}/ws/stream/${encodeURIComponent(
+            phoneNumber
+          )}`
+        );
+
+      wsRef.current = ws;
+
+
+      /* =================================================
+         WS OPEN
+         ================================================= */
+
+      ws.onopen = () => {
+
+        console.log(
+          '[WS] CONNECTION OPEN'
+        );
+
+
+        /* *888 ALWAYS HUMAN */
+
+        if (
+          phoneNumber ===
+          HUMAN_DEMO_NUMBER
+        ) {
+
+          console.log(
+            '[DEMO] *888 -> HUMAN'
+          );
+
+          playerScam.pause();
+          playerScam.seekTo(0);
+
+          playerHuman.seekTo(0);
+          playerHuman.play();
+
+          ws.send(
+            JSON.stringify({
+              action: 'start_demo',
+              type: 'human',
+            })
+          );
+
+          return;
+        }
+
+
+        /* *999 ALWAYS SCAM */
+
+        if (
+          phoneNumber ===
+          SCAM_DEMO_NUMBER
+        ) {
+
+          console.log(
+            '[DEMO] *999 -> AI / SCAM'
+          );
+
+          playerHuman.pause();
+          playerHuman.seekTo(0);
+
+          playerScam.seekTo(0);
+          playerScam.play();
+
+          ws.send(
+            JSON.stringify({
+              action: 'start_demo',
+              type: 'scam',
+            })
+          );
+
+          return;
+        }
+
+
+        console.log(
+          '[CALL] Normal number - no demo audio'
+        );
+      };
+
+
+      /* =================================================
+         WS MESSAGE
+         ================================================= */
+
+      ws.onmessage = (
+        event
+      ) => {
+
+        try {
+
+          const data =
+            JSON.parse(
+              event.data
+            );
+
+          console.log(
+            '[AI RESULT]',
+            data
+          );
+
+          if (
+            data.status ===
+            'speech_detected'
+          ) {
+
+            setRiskScore(
+              Number(
+                data.risk_score ||
+                  0
+              )
+            );
+          }
+
+        } catch (error) {
+
+          console.log(
+            '[WS] Message parse error:',
+            error
+          );
+        }
+      };
+
+
+      /* =================================================
+         WS ERROR
+         ================================================= */
+
+      ws.onerror = (
+        error
+      ) => {
+
+        console.log(
+          '[WS] ERROR:',
+          error
+        );
+      };
+
+
+      /* =================================================
+         WS CLOSE
+         ================================================= */
+
+      ws.onclose = (
+        event
+      ) => {
+
+        console.log(
+          '[WS] CONNECTION CLOSED',
+          'Code:',
+          event.code
+        );
+      };
+
+    } catch (error) {
+
+      console.log(
+        '[CALL] Error:',
+        error
+      );
+
+      setInCall(false);
+
+      Alert.alert(
+        'Call Error',
+        'Unable to connect to the AI defense server.'
+      );
+    }
+  };
+
+
+  /* =======================================================
+     END CALL
+     ======================================================= */
+
+  const endCall = () => {
+
+    console.log(
+      '[CALL] Ending call...'
+    );
+
+    setInCall(false);
+
+    setRiskScore(0);
+
+    setPhoneNumber('');
+
+    setCurrentCallType(
+      'human'
+    );
+
+    if (wsRef.current) {
+
+      try {
+
+        wsRef.current.close();
+
+      } catch (error) {
+
+        console.log(
+          '[WS] Close error:',
+          error
+        );
+      }
+
+      wsRef.current = null;
+    }
+
+    playerScam.pause();
+    playerScam.seekTo(0);
+
+    playerHuman.pause();
+    playerHuman.seekTo(0);
+  };
+
+
+  /* =======================================================
+     BACKSPACE
+     ======================================================= */
+
+  const deleteLastDigit = () => {
+
+    setPhoneNumber(
+      previous =>
+        previous.slice(
+          0,
+          -1
+        )
+    );
+  };
+
+
+  const clearPhoneNumber = () => {
+
+    setPhoneNumber('');
+  };
+
+
+  /* =======================================================
+     REGISTRATION BACKSPACE
+     ======================================================= */
+
+  const deleteLastIdentityDigit = () => {
+
+    setMyIdentity(
+      previous =>
+        previous.slice(
+          0,
+          -1
+        )
+    );
+  };
+
+
+  /* =======================================================
+     CONTACT RENDERER
+     ======================================================= */
+
+  const renderContact = ({
+    item,
+  }: {
+    item: any;
+  }) => {
+
+    const initial =
+      item.name
+        ? item.name
+            .charAt(0)
+            .toUpperCase()
+        : '#';
+
+    const colors = [
+      '#8b5cf6',
+      '#ec4899',
+      '#f59e0b',
+      '#10b981',
+      '#3b82f6',
+    ];
+
+    const bgColor =
+      colors[
+        initial.charCodeAt(0) %
+          colors.length
+      ];
+
+    const phone =
+      item.phoneNumbers?.[0]?.number ||
+      'No number';
+
+    return (
+      <View
+        style={
+          styles.contactRow
+        }
+      >
+
+        <View
+          style={[
+            styles.avatar,
+            {
+              backgroundColor:
+                bgColor,
+            },
+          ]}
+        >
+
+          <Text
+            style={
+              styles.avatarText
+            }
+          >
+            {initial}
+          </Text>
+
+        </View>
+
+
+        <View
+          style={
+            styles.contactDetails
+          }
+        >
+
+          <Text
+            style={
+              styles.contactName
+            }
+            numberOfLines={1}
+          >
+            {item.name ||
+              'Unknown'}
+          </Text>
+
+          <Text
+            style={
+              styles.contactPhone
+            }
+            numberOfLines={1}
+          >
+            {phone}
+          </Text>
+
+        </View>
+
+
+        <TouchableOpacity
+          style={
+            styles.contactCallButton
+          }
+          onPress={() =>
+            callContact(item)
+          }
+        >
+
+          <Ionicons
+            name="call"
+            size={20}
+            color="#1e1e24"
+          />
+
+        </TouchableOpacity>
+
+      </View>
+    );
+  };
+
+
+  /* =======================================================
+     REGISTRATION SCREEN
+     ======================================================= */
+
+  if (!isRegistered) {
+
+    return (
+      <View
+        style={
+          styles.container
+        }
+      >
+
+        <StatusBar
+          barStyle="light-content"
+          backgroundColor="#1e1e24"
+        />
+
+        <View
+          style={
+            styles.loginContent
+          }
+        >
+
+          <Ionicons
+            name="shield-checkmark"
+            size={60}
+            color="#a8c7fa"
+            style={{
+              marginBottom: 20,
+            }}
+          />
+
+          <Text
+            style={
+              styles.titleText
+            }
+          >
+            Verify Number
+          </Text>
+
+          <Text
+            style={
+              styles.subText
+            }
+          >
+            Enter your phone number
+            to access the secure
+            dialer network.
+          </Text>
+
+          <View
+            style={
+              styles.identityDisplay
+            }
+          >
+
+            <Text
+              style={
+                styles.dialerInput
+              }
+              adjustsFontSizeToFit
+              numberOfLines={1}
+            >
+              {myIdentity ||
+                ' '}
+            </Text>
+
+          </View>
+
+          <View
+            style={
+              styles.registrationKeypad
+            }
+          >
+
+            {DIAL_PAD.map(
+              key => (
+
+                <TouchableOpacity
+                  key={key.num}
+                  style={
+                    styles.registrationKey
+                  }
+                  onPress={() =>
+                    setMyIdentity(
+                      previous =>
+                        previous +
+                        key.num
+                    )
+                  }
+                >
+
+                  <Text
+                    style={
+                      styles.keyText
+                    }
+                  >
+                    {key.num}
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.keyLetters
+                    }
+                  >
+                    {key.letters}
+                  </Text>
+
+                </TouchableOpacity>
+
+              )
+            )}
+
+          </View>
+
+          <View
+            style={
+              styles.registrationActions
+            }
+          >
+
+            <TouchableOpacity
+              style={
+                styles.smallDeleteButton
+              }
+              onPress={
+                deleteLastIdentityDigit
+              }
+              onLongPress={() =>
+                setMyIdentity('')
+              }
+            >
+
+              {myIdentity.length > 0 && (
+
+                <Ionicons
+                  name="backspace-outline"
+                  size={28}
+                  color="#e3e3e3"
+                />
+
+              )}
+
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.connectBtn,
+                {
+                  opacity:
+                    myIdentity.length >
+                    3
+                      ? 1
+                      : 0.5,
+                },
+              ]}
+              onPress={() =>
+                myIdentity.length >
+                  3 &&
+                setIsRegistered(
+                  true
+                )
+              }
+              disabled={
+                myIdentity.length <= 3
+              }
+            >
+
+              <Text
+                style={
+                  styles.connectBtnText
+                }
+              >
+                Continue
+              </Text>
+
+            </TouchableOpacity>
+
+            <View
+              style={
+                styles.smallDeleteButton
+              }
+            />
+
+          </View>
+
+        </View>
+
+      </View>
+    );
+  }
+
+
+  /* =======================================================
+     CALL SCREEN
+     ======================================================= */
+
+  if (inCall) {
+
+    const isDanger =
+      riskScore > 50;
+
+    const isScamDemo =
+      currentCallType ===
+      'scam';
+
+    return (
+      <View
+        style={[
+          styles.container,
+          isDanger
+            ? styles.bgDanger
+            : styles.bgSafe,
+        ]}
+      >
+
+        <StatusBar
+          barStyle="light-content"
+          backgroundColor={
+            isDanger
+              ? '#3b1a1a'
+              : '#1e1e24'
+          }
+        />
+
+        <View
+          style={
+            styles.callHeader
+          }
+        >
+
+          <Text
+            style={
+              styles.callStatus
+            }
+          >
+            Ongoing call
+          </Text>
+
+          <Text
+            style={
+              styles.caller
+            }
+          >
+            {phoneNumber}
+          </Text>
+
+          {phoneNumber ===
+            HUMAN_DEMO_NUMBER && (
+
+            <View
+              style={
+                styles.demoBadgeHuman
+              }
+            >
+
+              <Ionicons
+                name="person"
+                size={15}
+                color="#1e1e24"
+              />
+
+              <Text
+                style={
+                  styles.demoBadgeText
+                }
+              >
+                FIXED HUMAN DEMO
+              </Text>
+
+            </View>
+
+          )}
+
+          {phoneNumber ===
+            SCAM_DEMO_NUMBER && (
+
+            <View
+              style={
+                styles.demoBadgeScam
+              }
+            >
+
+              <Ionicons
+                name="warning"
+                size={15}
+                color="#ffffff"
+              />
+
+              <Text
+                style={
+                  styles.demoBadgeTextWhite
+                }
+              >
+                FIXED AI / SCAM DEMO
+              </Text>
+
+            </View>
+
+          )}
+
+        </View>
+
+
+        <View
+          style={
+            styles.avatarContainer
+          }
+        >
+
+          <Ionicons
+            name="person-circle"
+            size={130}
+            color={
+              isDanger
+                ? '#ff8a8a'
+                : '#a8c7fa'
+            }
+          />
+
+        </View>
+
+
+        <View
+          style={
+            styles.analysisContainer
+          }
+        >
+
+          <Animated.View
+            style={[
+              styles.alertBox,
+              {
+                transform: [
+                  {
+                    scale:
+                      pulseAnim,
+                  },
+                ],
+                borderColor:
+                  isDanger
+                    ? '#ff5252'
+                    : '#a8c7fa',
+              },
+            ]}
+          >
+
+            <View
+              style={
+                styles.riskHeader
+              }
+            >
+
+              <Ionicons
+                name={
+                  isDanger
+                    ? 'warning'
+                    : 'shield-checkmark'
+                }
+                size={25}
+                color={
+                  isDanger
+                    ? '#ff5252'
+                    : '#a8c7fa'
+                }
+              />
+
+              <Text
+                style={[
+                  styles.alertText,
+                  {
+                    color:
+                      isDanger
+                        ? '#ff5252'
+                        : '#a8c7fa',
+                  },
+                ]}
+              >
+                Risk Score:{' '}
+                {Number(
+                  riskScore
+                ).toFixed(2)}
+                %
+              </Text>
+
+            </View>
+
+            <Text
+              style={
+                styles.alertSub
+              }
+            >
+              {isDanger
+                ? 'Voice Impersonation Detected'
+                : 'Voice Biometrics Verified'}
+            </Text>
+
+            {isScamDemo && (
+
+              <Text
+                style={
+                  styles.demoExplanation
+                }
+              >
+                AI-generated /
+                cloned voice
+                demonstration
+              </Text>
+
+            )}
+
+            {!isScamDemo &&
+              phoneNumber ===
+                HUMAN_DEMO_NUMBER && (
+
+              <Text
+                style={
+                  styles.demoExplanation
+                }
+              >
+                Authentic human
+                voice
+                demonstration
+              </Text>
+
+            )}
+
+          </Animated.View>
+
+        </View>
+
+
+        <View
+          style={
+            styles.callControls
+          }
+        >
+
+          <TouchableOpacity
+            style={
+              styles.btnEnd
+            }
+            onPress={
+              endCall
+            }
+          >
+
+            <Ionicons
+              name="call"
+              size={32}
+              color="#ffffff"
+              style={{
+                transform: [
+                  {
+                    rotate:
+                      '135deg',
+                  },
+                ],
+              }}
+            />
+
+          </TouchableOpacity>
+
+          <Text
+            style={
+              styles.endCallText
+            }
+          >
+            End call
+          </Text>
+
+        </View>
+
+      </View>
+    );
+  }
+
+
+  /* =======================================================
+     FILTER CONTACTS
+     ======================================================= */
+
+  const filteredContacts =
+    myContacts.filter(
+      (contact: any) =>
+        (
+          contact.name || ''
+        )
+          .toLowerCase()
+          .includes(
+            searchQuery.toLowerCase()
+          ) ||
+        (
+          contact.phoneNumbers?.[0]
+            ?.number || ''
+        )
+          .toLowerCase()
+          .includes(
+            searchQuery.toLowerCase()
+          )
+    );
+
+
+  /* =======================================================
+     MAIN UI
+     ======================================================= */
+
+  return (
+
+    <View
+      style={
+        styles.container
+      }
+    >
+
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor="#1e1e24"
+      />
+
+
+      {/* SEARCH */}
+
+      <View
+        style={
+          styles.topBar
+        }
+      >
+
+        <View
+          style={
+            styles.searchBar
+          }
+        >
+
+          <Ionicons
+            name="search"
+            size={20}
+            color="#c4c7c5"
+          />
+
+          <TextInput
+            style={
+              styles.searchInput
+            }
+            placeholder="Search contacts"
+            placeholderTextColor="#c4c7c5"
+            value={
+              searchQuery
+            }
+            onChangeText={
+              setSearchQuery
+            }
+          />
+
+          <Ionicons
+            name="mic"
+            size={20}
+            color="#c4c7c5"
+          />
+
+        </View>
+
+      </View>
+
+
+      <View
+        style={
+          styles.content
+        }
+      >
+
+
+        {/* =================================================
+            CONTACTS
+            ================================================= */}
+
+        {activeTab ===
+          'contacts' && (
+
+          <View
+            style={
+              styles.tabContainer
+            }
+          >
+
+            <FlatList
+              data={
+                filteredContacts
+              }
+
+              keyExtractor={(
+                item,
+                index
+              ) =>
+                item.id ||
+                index.toString()
+              }
+
+              renderItem={
+                renderContact
+              }
+
+              showsVerticalScrollIndicator={
+                true
+              }
+
+              contentContainerStyle={
+                styles.contactsList
+              }
+
+              ListHeaderComponent={
+                () => (
+
+                  <View
+                    style={
+                      styles.contactHeader
+                    }
+                  >
+
+                    <View
+                      style={
+                        styles.contactsTitleRow
+                      }
+                    >
+
+                      <View>
+
+                        <Text
+                          style={
+                            styles.contactsTitle
+                          }
+                        >
+                          Contacts
+                        </Text>
+
+                        <Text
+                          style={
+                            styles.contactsSubtitle
+                          }
+                        >
+                          {myContacts.length}{' '}
+                          contacts on
+                          device
+                        </Text>
+
+                      </View>
+
+                      <TouchableOpacity
+                        style={
+                          styles.refreshContactsButton
+                        }
+                        onPress={
+                          loadContacts
+                        }
+                      >
+
+                        <Ionicons
+                          name="refresh"
+                          size={20}
+                          color="#a8c7fa"
+                        />
+
+                      </TouchableOpacity>
+
+                    </View>
+
+
+                    <TouchableOpacity
+                      style={
+                        styles.createContactBtn
+                      }
+                      onPress={() =>
+                        Alert.alert(
+                          'Create Contact',
+                          'Use your device Contacts app to create a new contact.'
+                        )
+                      }
+                    >
+
+                      <Ionicons
+                        name="person-add-outline"
+                        size={20}
+                        color="#a8c7fa"
+                      />
+
+                      <Text
+                        style={
+                          styles.createContactText
+                        }
+                      >
+                        Create contact
+                      </Text>
+
+                    </TouchableOpacity>
+
+
+                    <Text
+                      style={
+                        styles.sectionTitle
+                      }
+                    >
+                      All contacts
+                    </Text>
+
+                  </View>
+                )
+              }
+
+              ListEmptyComponent={
+                () => (
+
+                  <View
+                    style={
+                      styles.emptyContacts
+                    }
+                  >
+
+                    <Ionicons
+                      name="people-outline"
+                      size={60}
+                      color="#55555d"
+                    />
+
+                    <Text
+                      style={
+                        styles.emptyContactsTitle
+                      }
+                    >
+                      No contacts found
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.emptyContactsText
+                      }
+                    >
+                      Allow contacts
+                      permission or
+                      change your
+                      search.
+                    </Text>
+
+                  </View>
+
+                )
+              }
+
+            />
+
+          </View>
+        )}
+
+
+        {/* =================================================
+            DIALER
+            ================================================= */}
+
+        {activeTab ===
+          'dialer' && (
+
+          <View
+            style={
+              styles.dialerContainer
+            }
+          >
+
+            {/* NUMBER */}
+
+            <View
+              style={
+                styles.displayArea
+              }
+            >
+
+              <Text
+                style={
+                  styles.dialerInput
+                }
+                adjustsFontSizeToFit
+                numberOfLines={1}
+              >
+                {phoneNumber ||
+                  'Enter phone number'}
+              </Text>
+
+              {phoneNumber.length >
+                0 && (
+
+                <Text
+                  style={
+                    styles.addNumberText
+                  }
+                >
+                  Add to contacts
+                </Text>
+
+              )}
+
+            </View>
+
+
+            {/* =================================================
+                SUGGESTIONS
+                ================================================= */}
+
+            {suggestedContacts.length >
+              0 && (
+
+              <View
+                style={
+                  styles.suggestionsContainer
+                }
+              >
+
+                <View
+                  style={
+                    styles.suggestionsHeader
+                  }
+                >
+
+                  <Text
+                    style={
+                      styles.suggestionsTitle
+                    }
+                  >
+                    Suggested
+                  </Text>
+
+                </View>
+
+
+                <ScrollView
+                  style={
+                    styles.suggestionsScroll
+                  }
+                  contentContainerStyle={
+                    styles.suggestionsScrollContent
+                  }
+                  showsVerticalScrollIndicator={
+                    true
+                  }
+                  nestedScrollEnabled={
+                    true
+                  }
+                  keyboardShouldPersistTaps="handled"
+                >
+
+                  {suggestedContacts.map(
+                    (
+                      contact: any,
+                      index: number
+                    ) => {
+
+                      const initial =
+                        contact.name
+                          ?.charAt(0)
+                          ?.toUpperCase() ||
+                        '#';
+
+                      const number =
+                        contact
+                          .phoneNumbers?.[0]
+                          ?.number ||
+                        '';
+
+                      return (
+
+                        <TouchableOpacity
+                          key={
+                            contact.id ||
+                            index.toString()
+                          }
+                          style={
+                            styles.suggestionRow
+                          }
+                          activeOpacity={
+                            0.7
+                          }
+                          onPress={() =>
+                            selectSuggestedContact(
+                              contact
+                            )
+                          }
+                        >
+
+                          <View
+                            style={
+                              styles.suggestionAvatar
+                            }
+                          >
+
+                            <Text
+                              style={
+                                styles.suggestionAvatarText
+                              }
+                            >
+                              {initial}
+                            </Text>
+
+                          </View>
+
+
+                          <View
+                            style={
+                              styles.suggestionDetails
+                            }
+                          >
+
+                            <Text
+                              style={
+                                styles.suggestionName
+                              }
+                              numberOfLines={
+                                1
+                              }
+                            >
+                              {contact.name}
+                            </Text>
+
+                            <Text
+                              style={
+                                styles.suggestionPhone
+                              }
+                              numberOfLines={
+                                1
+                              }
+                            >
+                              Mobile {number}
+                            </Text>
+
+                          </View>
+
+
+                          <Ionicons
+                            name="call-outline"
+                            size={26}
+                            color="#c4c7c5"
+                          />
+
+                        </TouchableOpacity>
+
+                      );
+                    }
+                  )}
+
+                </ScrollView>
+
+              </View>
+
+            )}
+
+
+            {/* =================================================
+                DEMO INFO
+                ================================================= */}
+
+            <View
+              style={
+                styles.demoInfoCard
+              }
+            >
+
+              <View
+                style={
+                  styles.demoInfoRow
+                }
+              >
+
+                <View
+                  style={
+                    styles.demoNumberHuman
+                  }
+                >
+
+                  <Text
+                    style={
+                      styles.demoNumberText
+                    }
+                  >
+                    *888
+                  </Text>
+
+                </View>
+
+                <View
+                  style={
+                    styles.demoInfoTextContainer
+                  }
+                >
+
+                  <Text
+                    style={
+                      styles.demoInfoTitle
+                    }
+                  >
+                    Human Voice
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.demoInfoSub
+                    }
+                  >
+                    Fixed authentic
+                    voice demo
+                  </Text>
+
+                </View>
+
+                <Ionicons
+                  name="person"
+                  size={20}
+                  color="#a8c7fa"
+                />
+
+              </View>
+
+
+              <View
+                style={
+                  styles.demoDivider
+                }
+              />
+
+
+              <View
+                style={
+                  styles.demoInfoRow
+                }
+              >
+
+                <View
+                  style={
+                    styles.demoNumberScam
+                  }
+                >
+
+                  <Text
+                    style={
+                      styles.demoNumberText
+                    }
+                  >
+                    *999
+                  </Text>
+
+                </View>
+
+                <View
+                  style={
+                    styles.demoInfoTextContainer
+                  }
+                >
+
+                  <Text
+                    style={
+                      styles.demoInfoTitle
+                    }
+                  >
+                    AI / Scam Voice
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.demoInfoSub
+                    }
+                  >
+                    Fixed cloned voice
+                    demo
+                  </Text>
+
+                </View>
+
+                <Ionicons
+                  name="warning-outline"
+                  size={20}
+                  color="#ff8a8a"
+                />
+
+              </View>
+
+            </View>
+
+
+            {/* =================================================
+                KEYPAD
+                ================================================= */}
+
+            <View
+              style={
+                styles.keypad
+              }
+            >
+
+              {DIAL_PAD.map(
+                key => (
+
+                  <TouchableOpacity
+                    key={key.num}
+                    style={
+                      styles.key
+                    }
+                    activeOpacity={
+                      0.7
+                    }
+                    onPress={() =>
+                      setPhoneNumber(
+                        previous =>
+                          previous +
+                          key.num
+                      )
+                    }
+                  >
+
+                    <Text
+                      style={
+                        styles.keyText
+                      }
+                    >
+                      {key.num}
+                    </Text>
+
+                    {key.letters !==
+                      '' && (
+
+                      <Text
+                        style={
+                          styles.keyLetters
+                        }
+                      >
+                        {key.letters}
+                      </Text>
+
+                    )}
+
+                    {key.num ===
+                      '0' && (
+
+                      <Text
+                        style={
+                          styles.keyPlus
+                        }
+                      >
+                        +
+                      </Text>
+
+                    )}
+
+                  </TouchableOpacity>
+
+                )
+              )}
+
+            </View>
+
+
+            {/* =================================================
+                BACKSPACE
+                ================================================= */}
+
+            <View
+              style={
+                styles.backspaceRow
+              }
+            >
+
+              <TouchableOpacity
+                style={
+                  styles.backspaceButton
+                }
+                activeOpacity={
+                  0.65
+                }
+                onPress={
+                  deleteLastDigit
+                }
+                onLongPress={
+                  clearPhoneNumber
+                }
+                delayLongPress={
+                  500
+                }
+              >
+
+                <Ionicons
+                  name="backspace-outline"
+                  size={28}
+                  color="#d9d9df"
+                />
+
+              </TouchableOpacity>
+
+            </View>
+
+
+            {/* =================================================
+                CALL
+                ================================================= */}
+
+            <TouchableOpacity
+              style={
+                styles.btnCall
+              }
+              activeOpacity={
+                0.75
+              }
+              onPress={
+                initiateCall
+              }
+            >
+
+              <Ionicons
+                name="call"
+                size={27}
+                color="#07140d"
+              />
+
+              <Text
+                style={
+                  styles.callButtonText
+                }
+              >
+                Call
+              </Text>
+
+            </TouchableOpacity>
+
+
+            <Text
+              style={
+                styles.backspaceHint
+              }
+            >
+              Tap backspace to remove one digit •
+              Hold to clear
+            </Text>
+
+
+            <View
+              style={
+                styles.protectionRow
+              }
+            >
+
+              <Ionicons
+                name="shield-checkmark-outline"
+                size={18}
+                color="#55555d"
+              />
+
+              <Text
+                style={
+                  styles.protectionText
+                }
+              >
+                Protected by real-time
+                AI voice analysis
+              </Text>
+
+            </View>
+
+          </View>
+
+        )}
+
+
+        {/* =================================================
+            SCAN
+            ================================================= */}
+
+        {activeTab ===
+          'scan' && (
+
+          <ScrollView
+            style={
+              styles.scanScroll
+            }
+            contentContainerStyle={
+              styles.scanScrollContent
+            }
+            showsVerticalScrollIndicator={
+              true
+            }
+            nestedScrollEnabled={
+              true
+            }
+            keyboardShouldPersistTaps="handled"
+          >
+
+            <View
+              style={
+                styles.scanContainer
+              }
+            >
+
+              {/* HEADER */}
+
+              <View
+                style={
+                  styles.scanHeader
+                }
+              >
+
+                <View
+                  style={
+                    styles.scanIconCircle
+                  }
+                >
+
+                  <Ionicons
+                    name="document-lock"
+                    size={45}
+                    color="#a8c7fa"
+                  />
+
+                </View>
+
+                <Text
+                  style={
+                    styles.scanTitle
+                  }
+                >
+                  Media Analyzer
+                </Text>
+
+                <Text
+                  style={
+                    styles.scanSub
+                  }
+                >
+                  Upload recorded calls
+                  or voice notes to
+                  verify authenticity.
+                </Text>
+
+              </View>
+
+
+              {/* UPLOAD */}
+
+              <TouchableOpacity
+                style={
+                  styles.uploadBox
+                }
+                activeOpacity={
+                  0.75
+                }
+                onPress={
+                  handlePickFile
+                }
+              >
+
+                <Ionicons
+                  name="cloud-upload-outline"
+                  size={42}
+                  color="#c4c7c5"
+                />
+
+                <Text
+                  style={
+                    styles.uploadText
+                  }
+                >
+                  {selectedFile
+                    ? selectedFile.name ||
+                      'Audio file selected'
+                    : 'Choose Audio File'}
+                </Text>
+
+                <Text
+                  style={
+                    styles.uploadSubText
+                  }
+                >
+                  MP3, WAV and other
+                  audio formats
+                </Text>
+
+                {!selectedFile && (
+
+                  <View
+                    style={
+                      styles.browseButton
+                    }
+                  >
+
+                    <Text
+                      style={
+                        styles.browseButtonText
+                      }
+                    >
+                      Browse Files
+                    </Text>
+
+                  </View>
+
+                )}
+
+              </TouchableOpacity>
+
+
+              {/* SELECTED FILE */}
+
+              {selectedFile && (
+
+                <View
+                  style={
+                    styles.selectedAudioCard
+                  }
+                >
+
+                  <View
+                    style={
+                      styles.audioFileIcon
+                    }
+                  >
+
+                    <Ionicons
+                      name="musical-notes"
+                      size={27}
+                      color="#ffffff"
+                    />
+
+                  </View>
+
+                  <View
+                    style={
+                      styles.selectedAudioDetails
+                    }
+                  >
+
+                    <Text
+                      style={
+                        styles.selectedAudioLabel
+                      }
+                    >
+                      SELECTED AUDIO
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.selectedAudioName
+                      }
+                      numberOfLines={
+                        1
+                      }
+                    >
+                      {selectedFile.name ||
+                        'Audio file'}
+                    </Text>
+
+                  </View>
+
+                  <View
+                    style={
+                      styles.selectedCheck
+                    }
+                  >
+
+                    <Ionicons
+                      name="checkmark"
+                      size={22}
+                      color="#07140d"
+                    />
+
+                  </View>
+
+                </View>
+
+              )}
+
+
+              {/* ANALYZE */}
+
+              {selectedFile && (
+
+                <TouchableOpacity
+                  style={
+                    styles.analyzeBtn
+                  }
+                  onPress={
+                    analyzeFile
+                  }
+                  disabled={
+                    isAnalyzing
+                  }
+                  activeOpacity={
+                    0.8
+                  }
+                >
+
+                  {isAnalyzing ? (
+
+                    <ActivityIndicator
+                      color="#052d59"
+                    />
+
+                  ) : (
+
+                    <>
+
+                      <Ionicons
+                        name="scan-outline"
+                        size={20}
+                        color="#052d59"
+                      />
+
+                      <Text
+                        style={
+                          styles.analyzeBtnText
+                        }
+                      >
+                        Run AI Analysis
+                      </Text>
+
+                    </>
+
+                  )}
+
+                </TouchableOpacity>
+
+              )}
+
+
+              {/* RESULT */}
+
+              {fileRiskScore !==
+                null && (
+
+                <Animated.View
+                  style={[
+                    styles.fileResult,
+                    {
+                      transform: [
+                        {
+                          scale:
+                            pulseAnim,
+                        },
+                      ],
+                      borderColor:
+                        fileRiskScore >
+                        50
+                          ? '#ff5252'
+                          : '#a8c7fa',
+                    },
+                  ]}
+                >
+
+                  <View
+                    style={
+                      styles.resultHeader
+                    }
+                  >
+
+                    <View>
+
+                      <Text
+                        style={
+                          styles.analysisCompleteTitle
+                        }
+                      >
+                        Analysis Complete
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.analysisCompleteSub
+                        }
+                      >
+                        AI voice authenticity
+                        assessment
+                      </Text>
+
+                    </View>
+
+                    <View
+                      style={
+                        styles.resultCheckCircle
+                      }
+                    >
+
+                      <Ionicons
+                        name="checkmark"
+                        size={27}
+                        color="#ffffff"
+                      />
+
+                    </View>
+
+                  </View>
+
+
+                  <Text
+                    style={
+                      styles.impersonationLabel
+                    }
+                  >
+                    IMPERSONATION RISK
+                  </Text>
+
+
+                  <Text
+                    style={[
+                      styles.fileRiskScore,
+                      {
+                        color:
+                          fileRiskScore >
+                          50
+                            ? '#ff5252'
+                            : '#a8c7fa',
+                      },
+                    ]}
+                  >
+                    {Number(
+                      fileRiskScore
+                    ).toFixed(2)}
+                    %
+                  </Text>
+
+
+                  <View
+                    style={[
+                      styles.riskBadge,
+                      {
+                        backgroundColor:
+                          fileRiskScore >
+                          50
+                            ? '#351c22'
+                            : '#17392b',
+                      },
+                    ]}
+                  >
+
+                    <Text
+                      style={[
+                        styles.riskBadgeText,
+                        {
+                          color:
+                            fileRiskScore >
+                            50
+                              ? '#ff5252'
+                              : '#45d99a',
+                        },
+                      ]}
+                    >
+                      {fileRiskScore >
+                      75
+                        ? 'Critical'
+                        : fileRiskScore >
+                          50
+                        ? 'High Risk'
+                        : 'Safe'}
+                    </Text>
+
+                  </View>
+
+
+                  <View
+                    style={
+                      styles.resultDivider
+                    }
+                  />
+
+
+                  {/* FILE NAME */}
+
+                  <View
+                    style={
+                      styles.resultInfoRow
+                    }
+                  >
+
+                    <Text
+                      style={
+                        styles.resultInfoLabel
+                      }
+                    >
+                      FILE
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.resultInfoValue
+                      }
+                      numberOfLines={
+                        1
+                      }
+                    >
+                      {selectedFile?.name ||
+                        'Unknown'}
+                    </Text>
+
+                  </View>
+
+
+                  {/* CHUNKS */}
+
+                  <View
+                    style={
+                      styles.resultInfoRow
+                    }
+                  >
+
+                    <Text
+                      style={
+                        styles.resultInfoLabel
+                      }
+                    >
+                      CHUNKS ANALYZED
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.resultInfoValue
+                      }
+                    >
+                      {fileChunks !==
+                      null
+                        ? `${fileChunks} chunks`
+                        : '—'}
+                    </Text>
+
+                  </View>
+
+
+                  <Text
+                    style={
+                      styles.fileResultText
+                    }
+                  >
+                    {fileRiskScore >
+                    50
+                      ? 'High probability of AI Generation / Voice Cloning.'
+                      : 'Audio verified as authentic human voice.'}
+                  </Text>
+
+                </Animated.View>
+
+              )}
+
+            </View>
+
+          </ScrollView>
+
+        )}
+
+      </View>
+
+
+      {/* =====================================================
+          BOTTOM NAV
+          ===================================================== */}
+
+      <View
+        style={
+          styles.bottomNav
+        }
+      >
+
+        <TouchableOpacity
+          style={
+            styles.navItem
+          }
+          onPress={() =>
+            setActiveTab(
+              'dialer'
+            )
+          }
+        >
+
+          <MaterialIcons
+            name="dialpad"
+            size={25}
+            color={
+              activeTab ===
+              'dialer'
+                ? '#a8c7fa'
+                : '#c4c7c5'
+            }
+          />
+
+          <Text
+            style={[
+              styles.navText,
+              activeTab ===
+                'dialer' && {
+                color:
+                  '#a8c7fa',
+              },
+            ]}
+          >
+            Keypad
+          </Text>
+
+        </TouchableOpacity>
+
+
+        <TouchableOpacity
+          style={
+            styles.navItem
+          }
+          onPress={
+            loadContacts
+          }
+        >
+
+          <Ionicons
+            name="people-outline"
+            size={25}
+            color={
+              activeTab ===
+              'contacts'
+                ? '#a8c7fa'
+                : '#c4c7c5'
+            }
+          />
+
+          <Text
+            style={[
+              styles.navText,
+              activeTab ===
+                'contacts' && {
+                color:
+                  '#a8c7fa',
+              },
+            ]}
+          >
+            Contacts
+          </Text>
+
+        </TouchableOpacity>
+
+
+        <TouchableOpacity
+          style={
+            styles.navItem
+          }
+          onPress={() =>
+            setActiveTab(
+              'scan'
+            )
+          }
+        >
+
+          <Ionicons
+            name="analytics"
+            size={25}
+            color={
+              activeTab ===
+              'scan'
+                ? '#a8c7fa'
+                : '#c4c7c5'
+            }
+          />
+
+          <Text
+            style={[
+              styles.navText,
+              activeTab ===
+                'scan' && {
+                color:
+                  '#a8c7fa',
+              },
+            ]}
+          >
+            Scan
+          </Text>
+
+        </TouchableOpacity>
+
+      </View>
+
+    </View>
+  );
+}
+
+
+/* ===========================================================
+   STYLES
+   =========================================================== */
+
+const styles = StyleSheet.create({
+
+  /* =========================================================
+     GLOBAL
+     ========================================================= */
+
+  container: {
+    flex: 1,
+    backgroundColor: '#1e1e24',
+
+    paddingTop:
+      Platform.OS === 'android'
+        ? StatusBar.currentHeight
+        : 50,
+  },
+
+  content: {
+    flex: 1,
+  },
+
+  bgSafe: {
+    backgroundColor: '#1e1e24',
+  },
+
+  bgDanger: {
+    backgroundColor: '#3b1a1a',
+  },
+
+
+  /* =========================================================
+     SEARCH
+     ========================================================= */
+
+  topBar: {
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+
+  searchBar: {
+    flexDirection: 'row',
+    backgroundColor: '#333338',
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    height: 46,
+    alignItems: 'center',
+  },
+
+  searchInput: {
+    flex: 1,
+    color: '#ffffff',
+    fontSize: 16,
+    marginHorizontal: 10,
+  },
+
+
+  /* =========================================================
+     LOGIN
+     ========================================================= */
+
+  loginContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 25,
+  },
+
+  titleText: {
+    color: '#e3e3e3',
+    fontSize: 28,
+    fontWeight: '400',
+    marginBottom: 10,
+  },
+
+  subText: {
+    color: '#c4c7c5',
+    fontSize: 16,
+    textAlign: 'center',
+    marginBottom: 25,
+    lineHeight: 22,
+  },
+
+  identityDisplay: {
+    width: '100%',
+    height: 60,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+
+  dialerInput: {
+    fontSize: 40,
+    color: '#e3e3e3',
+    fontWeight: '400',
+    letterSpacing: 2,
+  },
+
+  registrationKeypad: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    width: width * 0.78,
+    justifyContent: 'space-between',
+  },
+
+  registrationKey: {
+    width: width * 0.21,
+    height: width * 0.18,
+    borderRadius: 40,
+    backgroundColor: '#333338',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 9,
+  },
+
+  registrationActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '100%',
+    marginTop: 8,
+  },
+
+  smallDeleteButton: {
+    width: 55,
+    height: 50,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  connectBtn: {
+    flex: 1,
+    backgroundColor: '#a8c7fa',
+    paddingVertical: 14,
+    borderRadius: 24,
+    alignItems: 'center',
+  },
+
+  connectBtnText: {
+    color: '#052d59',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+
+
+  /* =========================================================
+     KEYS
+     ========================================================= */
+
+  keyText: {
+    color: '#e3e3e3',
+    fontSize: 30,
+    fontWeight: '400',
+  },
+
+  keyLetters: {
+    color: '#c4c7c5',
+    fontSize: 9,
+    fontWeight: '500',
+    marginTop: -2,
+    letterSpacing: 1.5,
+  },
+
+  keyPlus: {
+    color: '#c4c7c5',
+    fontSize: 9,
+    position: 'absolute',
+    bottom: 8,
+  },
+
+
+  /* =========================================================
+     CONTACTS
+     ========================================================= */
+
+  tabContainer: {
+    flex: 1,
+  },
+
+  contactsList: {
+    paddingBottom: 20,
+  },
+
+  contactHeader: {
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 5,
+  },
+
+  contactsTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+
+  contactsTitle: {
+    color: '#e3e3e3',
+    fontSize: 26,
+    fontWeight: '600',
+  },
+
+  contactsSubtitle: {
+    color: '#85858e',
+    fontSize: 13,
+    marginTop: 3,
+  },
+
+  refreshContactsButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#333338',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  createContactBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#333338',
+    padding: 13,
+    borderRadius: 13,
+    justifyContent: 'center',
+  },
+
+  createContactText: {
+    color: '#a8c7fa',
+    fontSize: 15,
+    fontWeight: '500',
+    marginLeft: 9,
+  },
+
+  sectionTitle: {
+    color: '#e3e3e3',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginLeft: 3,
+    marginTop: 17,
+    marginBottom: 5,
+  },
+
+  contactRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 11,
+    paddingHorizontal: 18,
+  },
+
+  avatar: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 14,
+  },
+
+  avatarText: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+
+  contactDetails: {
+    flex: 1,
+    borderBottomWidth: 0.5,
+    borderBottomColor: '#333338',
+    paddingBottom: 11,
+  },
+
+  contactName: {
+    color: '#e3e3e3',
+    fontSize: 16,
+    marginBottom: 3,
+  },
+
+  contactPhone: {
+    color: '#9b9ba3',
+    fontSize: 14,
+  },
+
+  contactCallButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#a8c7fa',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 10,
+  },
+
+  emptyContacts: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 80,
+    paddingHorizontal: 30,
+  },
+
+  emptyContactsTitle: {
+    color: '#e3e3e3',
+    fontSize: 18,
+    fontWeight: '600',
+    marginTop: 15,
+  },
+
+  emptyContactsText: {
+    color: '#85858e',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 8,
+    lineHeight: 20,
+  },
+
+
+  /* =========================================================
+     DIALER
+     ========================================================= */
+
+  dialerContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    paddingTop: 0,
+    overflow: 'hidden',
+  },
+
+  displayArea: {
+    height: 55,
+    width: '92%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  addNumberText: {
+    color: '#a8c7fa',
+    fontSize: 12,
+    marginTop: 2,
+  },
+
+
+  /* =========================================================
+     SUGGESTIONS
+     ========================================================= */
+
+  suggestionsContainer: {
+    width: '94%',
+    marginBottom: 5,
+    maxHeight: 205,
+  },
+
+  suggestionsHeader: {
+    paddingHorizontal: 4,
+    marginBottom: 4,
+    height: 22,
+    justifyContent: 'center',
+  },
+
+  suggestionsTitle: {
+    color: '#c4c7c5',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+
+  suggestionsScroll: {
+    maxHeight: 178,
+  },
+
+  suggestionsScrollContent: {
+    paddingBottom: 2,
+  },
+
+  suggestionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#292c34',
+    borderRadius: 9,
+    height: 54,
+    paddingHorizontal: 11,
+    marginBottom: 3,
+    borderWidth: 1,
+    borderColor: '#333640',
+  },
+
+  suggestionAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#a95d0b',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+
+  suggestionAvatarText: {
+    color: '#ffffff',
+    fontSize: 19,
+    fontWeight: '400',
+  },
+
+  suggestionDetails: {
+    flex: 1,
+  },
+
+  suggestionName: {
+    color: '#e3e3e3',
+    fontSize: 15,
+    fontWeight: '400',
+    marginBottom: 2,
+  },
+
+  suggestionPhone: {
+    color: '#b9bac1',
+    fontSize: 13,
+  },
+
+
+  /* =========================================================
+     DEMO CARD
+     ========================================================= */
+
+  demoInfoCard: {
+    width: '92%',
+    backgroundColor: '#292930',
+    borderRadius: 13,
+    paddingHorizontal: 13,
+    paddingVertical: 6,
+    marginBottom: 7,
+    borderWidth: 1,
+    borderColor: '#3a3a42',
+  },
+
+  demoInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 34,
+  },
+
+  demoNumberHuman: {
+    width: 50,
+    height: 29,
+    borderRadius: 8,
+    backgroundColor: '#a8c7fa',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  demoNumberScam: {
+    width: 50,
+    height: 29,
+    borderRadius: 8,
+    backgroundColor: '#8f3e3e',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  demoNumberText: {
+    color: '#11151b',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+
+  demoInfoTextContainer: {
+    flex: 1,
+    marginLeft: 11,
+  },
+
+  demoInfoTitle: {
+    color: '#e3e3e3',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+
+  demoInfoSub: {
+    color: '#85858e',
+    fontSize: 10,
+    marginTop: 1,
+  },
+
+  demoDivider: {
+    height: 1,
+    backgroundColor: '#3a3a42',
+    marginVertical: 3,
+  },
+
+
+  /* =========================================================
+     KEYPAD
+     ========================================================= */
+
+  keypad: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    width: width * 0.76,
+    justifyContent: 'space-between',
+  },
+
+  key: {
+    width: width * 0.215,
+    height: width * 0.125,
+    maxHeight: 60,
+    borderRadius: 32,
+    backgroundColor: '#333338',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+
+
+  /* =========================================================
+     BACKSPACE
+     ========================================================= */
+
+  backspaceRow: {
+    width: width * 0.76,
+    height: 38,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+
+  backspaceButton: {
+    width: 58,
+    height: 38,
+    borderRadius: 30,
+    backgroundColor: '#292930',
+    borderWidth: 1,
+    borderColor: '#414149',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  backspaceHint: {
+    color: '#66666f',
+    fontSize: 8,
+    marginTop: 2,
+    textAlign: 'center',
+  },
+
+
+  /* =========================================================
+     CALL
+     
+     ONLY CHANGE:
+     translateY moves the existing Call button upward
+     without changing any other layout or functionality.
+     ========================================================= */
+
+  btnCall: {
+    width: 124,
+    height: 58,
+    borderRadius: 30,
+    backgroundColor: '#55d17a',
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexDirection: 'row',
+    marginTop: -20,
+
+    // ONLY FIX FOR THE CURRENT SCREENSHOT:
+    transform: [
+      {
+        translateY: -18,
+      },
+    ],
+  },
+
+  callButtonText: {
+    color: '#07140d',
+    fontSize: 17,
+    fontWeight: '500',
+    marginLeft: 9,
+  },
+
+  protectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 7,
+  },
+
+  protectionText: {
+    color: '#55555d',
+    fontSize: 9,
+    marginLeft: 5,
+  },
+
+
+  /* =========================================================
+     SCAN SCROLL
+     ========================================================= */
+
+  scanScroll: {
+    flex: 1,
+  },
+
+  scanScrollContent: {
+    paddingBottom: 35,
+  },
+
+
+  /* =========================================================
+     SCAN
+     ========================================================= */
+
+  scanContainer: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 20,
+    alignItems: 'center',
+  },
+
+  scanHeader: {
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+
+  scanIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#292930',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 9,
+  },
+
+  scanTitle: {
+    color: '#e3e3e3',
+    fontSize: 23,
+    fontWeight: 'bold',
+  },
+
+  scanSub: {
+    color: '#c4c7c5',
+    textAlign: 'center',
+    marginTop: 6,
+    paddingHorizontal: 15,
+    lineHeight: 18,
+    fontSize: 12,
+  },
+
+  uploadBox: {
+    width: '100%',
+    borderWidth: 2,
+    borderColor: '#333338',
+    borderStyle: 'dashed',
+    borderRadius: 16,
+    paddingVertical: 23,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    backgroundColor:
+      'rgba(51,51,56,0.5)',
+  },
+
+  uploadText: {
+    color: '#e3e3e3',
+    marginTop: 10,
+    textAlign: 'center',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+
+  uploadSubText: {
+    color: '#777780',
+    marginTop: 5,
+    fontSize: 11,
+  },
+
+  browseButton: {
+    backgroundColor: '#333338',
+    paddingHorizontal: 25,
+    paddingVertical: 10,
+    borderRadius: 12,
+    marginTop: 12,
+  },
+
+  browseButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+
+
+  /* =========================================================
+     SELECTED AUDIO
+     ========================================================= */
+
+  selectedAudioCard: {
+    width: '100%',
+    backgroundColor: '#292930',
+    borderRadius: 15,
+    marginTop: 12,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#3a3a42',
+  },
+
+  audioFileIcon: {
+    width: 54,
+    height: 54,
+    borderRadius: 13,
+    backgroundColor: '#333338',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  selectedAudioDetails: {
+    flex: 1,
+    marginLeft: 13,
+  },
+
+  selectedAudioLabel: {
+    color: '#686871',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+
+  selectedAudioName: {
+    color: '#e3e3e3',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+
+  selectedCheck: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#45d99a',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+
+  /* =========================================================
+     ANALYZE
+     ========================================================= */
+
+  analyzeBtn: {
+    backgroundColor: '#a8c7fa',
+    paddingVertical: 13,
+    paddingHorizontal: 20,
+    borderRadius: 24,
+    marginTop: 13,
+    width: '80%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+
+  analyzeBtnText: {
+    color: '#052d59',
+    fontSize: 15,
+    fontWeight: 'bold',
+  },
+
+
+  /* =========================================================
+     RESULT
+     ========================================================= */
+
+  fileResult: {
+    marginTop: 15,
+    padding: 16,
+    backgroundColor: '#292930',
+    borderRadius: 17,
+    borderWidth: 1,
+    width: '100%',
+  },
+
+  resultHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  analysisCompleteTitle: {
+    color: '#ffffff',
+    fontSize: 21,
+    fontWeight: 'bold',
+  },
+
+  analysisCompleteSub: {
+    color: '#66666f',
+    fontSize: 12,
+    marginTop: 3,
+  },
+
+  resultCheckCircle: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#1d523d',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  impersonationLabel: {
+    color: '#686871',
+    fontSize: 10,
+    fontWeight: 'bold',
+    letterSpacing: 1.3,
+    textAlign: 'center',
+    marginTop: 18,
+  },
+
+  fileRiskScore: {
+    fontSize: 50,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginTop: 1,
+  },
+
+  riskBadge: {
+    alignSelf: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 7,
+    borderRadius: 20,
+    marginTop: 3,
+  },
+
+  riskBadgeText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+
+  resultDivider: {
+    height: 1,
+    backgroundColor: '#3a3a42',
+    marginVertical: 17,
+  },
+
+  resultInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+
+  resultInfoLabel: {
+    color: '#686871',
+    fontSize: 10,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+
+  resultInfoValue: {
+    color: '#e3e3e3',
+    fontSize: 14,
+    fontWeight: '600',
+    maxWidth: '65%',
+  },
+
+  fileResultText: {
+    color: '#9999a1',
+    marginTop: 6,
+    textAlign: 'center',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+
+
+  /* =========================================================
+     CALL SCREEN
+     ========================================================= */
+
+  callHeader: {
+    alignItems: 'center',
+    marginTop: 25,
+  },
+
+  callStatus: {
+    color: '#c4c7c5',
+    fontSize: 15,
+    marginBottom: 6,
+  },
+
+  caller: {
+    fontSize: 30,
+    color: '#e3e3e3',
+    fontWeight: '400',
+  },
+
+  demoBadgeHuman: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#a8c7fa',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+    marginTop: 10,
+    gap: 5,
+  },
+
+  demoBadgeScam: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#d64545',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+    marginTop: 10,
+    gap: 5,
+  },
+
+  demoBadgeText: {
+    color: '#1e1e24',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+
+  demoBadgeTextWhite: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+
+  avatarContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  analysisContainer: {
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    paddingBottom: 20,
+    width: '100%',
+  },
+
+  alertBox: {
+    backgroundColor: '#333338',
+    padding: 18,
+    borderRadius: 20,
+    width: '90%',
+    borderWidth: 1,
+  },
+
+  riskHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+
+  alertText: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    marginLeft: 9,
+  },
+
+  alertSub: {
+    color: '#e3e3e3',
+    textAlign: 'center',
+    fontSize: 15,
+    opacity: 0.85,
+  },
+
+  demoExplanation: {
+    color: '#85858e',
+    textAlign: 'center',
+    fontSize: 11,
+    marginTop: 8,
+  },
+
+  callControls: {
+    paddingBottom: 25,
+    alignItems: 'center',
+  },
+
+  btnEnd: {
+    backgroundColor: '#ff5252',
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  endCallText: {
+    color: '#85858e',
+    fontSize: 11,
+    marginTop: 5,
+  },
+
+
+  /* =========================================================
+     BOTTOM NAV
+     ========================================================= */
+
+  bottomNav: {
+    flexDirection: 'row',
+    backgroundColor: '#1e1e24',
+    paddingBottom:
+      Platform.OS === 'android'
+        ? 12
+        : 20,
+    paddingTop: 9,
+    borderTopWidth: 1,
+    borderTopColor: '#292930',
+  },
+
+  navItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  navText: {
+    color: '#c4c7c5',
+    fontSize: 11,
+    marginTop: 3,
+    fontWeight: '500',
+  },
+
+});
